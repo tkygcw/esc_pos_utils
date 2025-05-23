@@ -462,7 +462,7 @@ class Generator {
   ///
   /// A row contains up to 12 columns. A column has a width between 1 and 12.
   /// Total width of columns in one row must be equal 12.
-  List<int> row(List<PosColumn> cols) {
+  List<int> row(List<PosColumn> cols, {bool multiLine = true}) {
     List<int> bytes = [];
     final isSumValid = cols.fold(0, (int sum, col) => sum + col.width) == 12;
     if (!isSumValid) {
@@ -472,12 +472,10 @@ class Generator {
     List<PosColumn> nextRow = <PosColumn>[];
 
     for (int i = 0; i < cols.length; ++i) {
-      int colInd =
-      cols.sublist(0, i).fold(0, (int sum, col) => sum + col.width);
+      int colInd = cols.sublist(0, i).fold(0, (int sum, col) => sum + col.width);
       double charWidth = _getCharWidth(cols[i].styles);
       double fromPos = _colIndToPosition(colInd);
-      final double toPos =
-          _colIndToPosition(colInd + cols[i].width) - spaceBetweenRows;
+      final double toPos = _colIndToPosition(colInd + cols[i].width) - spaceBetweenRows;
       int maxCharactersNb = ((toPos - fromPos) / charWidth).floor();
 
       if (!cols[i].containsChinese) {
@@ -487,21 +485,101 @@ class Generator {
             : _encode(cols[i].text);
 
         // If the col's content is too long, split it to the next row
-        int realCharactersNb = encodedToPrint.length;
-        if (realCharactersNb > maxCharactersNb) {
-          // Print max possible and split to the next row
-          Uint8List encodedToPrintNextRow =
-          encodedToPrint.sublist(maxCharactersNb);
-          encodedToPrint = encodedToPrint.sublist(0, maxCharactersNb);
-          isNextRow = true;
-          nextRow.add(PosColumn(
-              textEncoded: encodedToPrintNextRow,
-              width: cols[i].width,
-              styles: cols[i].styles));
-        } else {
-          // Insert an empty col
-          nextRow.add(PosColumn(
-              text: '', width: cols[i].width, styles: cols[i].styles));
+        if (multiLine) {
+          int realCharactersNb = encodedToPrint.length;
+          if (realCharactersNb > maxCharactersNb) {
+            // MODIFIED SECTION: Handle line breaks first, then word-aware splitting
+            if (cols[i].textEncoded == null) {
+              // For regular text (not pre-encoded), handle line breaks and word-aware splitting
+              String originalText = cols[i].text;
+
+              // Check if there's a line break within the allowed character limit
+              int lineBreakIndex = originalText.indexOf('\n');
+              if (lineBreakIndex != -1 && lineBreakIndex < maxCharactersNb) {
+                // Split at the line break
+                String firstPart = originalText.substring(0, lineBreakIndex);
+                String secondPart = originalText.substring(lineBreakIndex + 1); // Skip the newline
+
+                encodedToPrint = _encode(firstPart);
+                Uint8List encodedToPrintNextRow = _encode(secondPart);
+
+                isNextRow = true;
+                nextRow.add(PosColumn(
+                    textEncoded: encodedToPrintNextRow,
+                    width: cols[i].width,
+                    styles: cols[i].styles));
+              } else {
+                // No line break within limit, proceed with word-aware splitting
+                // Find the last space before maxCharactersNb
+                int lastSpaceIndex = -1;
+                for (int j = 0; j < originalText.length && j < maxCharactersNb; j++) {
+                  if (originalText[j] == ' ') {
+                    lastSpaceIndex = j;
+                  }
+                }
+
+                // If we found a space, split at that position
+                if (lastSpaceIndex > 0) {
+                  String firstPart = originalText.substring(0, lastSpaceIndex);
+                  String secondPart = originalText.substring(lastSpaceIndex + 1); // Skip the space
+
+                  encodedToPrint = _encode(firstPart);
+                  Uint8List encodedToPrintNextRow = _encode(secondPart);
+
+                  isNextRow = true;
+                  nextRow.add(PosColumn(
+                      textEncoded: encodedToPrintNextRow,
+                      width: cols[i].width,
+                      styles: cols[i].styles));
+                } else {
+                  // No space found, fall back to character splitting
+                  Uint8List encodedToPrintNextRow = encodedToPrint.sublist(maxCharactersNb);
+                  encodedToPrint = encodedToPrint.sublist(0, maxCharactersNb);
+                  isNextRow = true;
+                  nextRow.add(PosColumn(
+                      textEncoded: encodedToPrintNextRow,
+                      width: cols[i].width,
+                      styles: cols[i].styles));
+                }
+              }
+            } else {
+              // For pre-encoded text, we can't easily do word-aware splitting
+              // so fall back to the original behavior
+              Uint8List encodedToPrintNextRow = encodedToPrint.sublist(maxCharactersNb);
+              encodedToPrint = encodedToPrint.sublist(0, maxCharactersNb);
+              isNextRow = true;
+              nextRow.add(PosColumn(
+                  textEncoded: encodedToPrintNextRow,
+                  width: cols[i].width,
+                  styles: cols[i].styles));
+            }
+          } else {
+            // Text fits in one line, but check for line breaks
+            if (cols[i].textEncoded == null) {
+              String originalText = cols[i].text;
+              int lineBreakIndex = originalText.indexOf('\n');
+              if (lineBreakIndex != -1) {
+                // Split at the line break even if it fits
+                String firstPart = originalText.substring(0, lineBreakIndex);
+                String secondPart = originalText.substring(lineBreakIndex + 1);
+
+                encodedToPrint = _encode(firstPart);
+                isNextRow = true;
+                nextRow.add(PosColumn(
+                    text: secondPart,
+                    width: cols[i].width,
+                    styles: cols[i].styles));
+              } else {
+                // Insert an empty col
+                nextRow.add(PosColumn(
+                    text: '', width: cols[i].width, styles: cols[i].styles));
+              }
+            } else {
+              // Insert an empty col
+              nextRow.add(PosColumn(
+                  text: '', width: cols[i].width, styles: cols[i].styles));
+            }
+          }
         }
         // end rows splitting
         bytes += _text(
@@ -511,51 +589,100 @@ class Generator {
           colWidth: cols[i].width,
         );
       } else {
-        // CASE 1: containsChinese = true
-        // Split text into multiple lines if it too long
-        int counter = 0;
-        int splitPos = 0;
-        for (int p = 0; p < cols[i].text.length; ++p) {
-          final int w = _isChinese(cols[i].text[p]) ? 2 : 1;
-          if (counter + w >= maxCharactersNb) {
-            break;
+        // CASE 2: containsChinese = true
+        // For Chinese text, handle line breaks first
+        String originalText = cols[i].text;
+        int lineBreakIndex = originalText.indexOf('\n');
+
+        if (lineBreakIndex != -1) {
+          // Handle line break in Chinese text
+          String toPrint = originalText.substring(0, lineBreakIndex);
+          String toPrintNextRow = originalText.substring(lineBreakIndex + 1);
+
+          if (toPrintNextRow.isNotEmpty) {
+            isNextRow = true;
+            nextRow.add(PosColumn(
+                text: toPrintNextRow,
+                containsChinese: true,
+                width: cols[i].width,
+                styles: cols[i].styles));
+          } else {
+            nextRow.add(PosColumn(
+                text: '', width: cols[i].width, styles: cols[i].styles));
           }
-          counter += w;
-          splitPos += 1;
-        }
-        String toPrintNextRow = cols[i].text.substring(splitPos);
-        String toPrint = cols[i].text.substring(0, splitPos);
 
-        if (toPrintNextRow.isNotEmpty) {
-          isNextRow = true;
-          nextRow.add(PosColumn(
-              text: toPrintNextRow,
-              containsChinese: true,
-              width: cols[i].width,
-              styles: cols[i].styles));
+          // Print current row (up to line break)
+          final list = _getLexemes(toPrint);
+          final List<String> lexemes = list[0];
+          final List<bool> isLexemeChinese = list[1];
+
+          int? colIndex = colInd;
+          for (var j = 0; j < lexemes.length; ++j) {
+            bytes += _text(
+              _encode(lexemes[j], isKanji: isLexemeChinese[j]),
+              styles: cols[i].styles,
+              colInd: colIndex,
+              colWidth: cols[i].width,
+              isKanji: isLexemeChinese[j],
+            );
+            colIndex = null;
+          }
         } else {
-          // Insert an empty col
-          nextRow.add(PosColumn(
-              text: '', width: cols[i].width, styles: cols[i].styles));
-        }
+          // Original Chinese text handling for length-based splitting
+          int counter = 0;
+          int splitPos = 0;
+          for (int p = 0; p < cols[i].text.length; ++p) {
+            final int w = _isChinese(cols[i].text[p]) ? 2 : 1;
+            if (counter + w >= maxCharactersNb) {
+              break;
+            }
+            counter += w;
+            splitPos += 1;
+          }
 
-        // Print current row
-        final list = _getLexemes(toPrint);
-        final List<String> lexemes = list[0];
-        final List<bool> isLexemeChinese = list[1];
+          String toPrint = cols[i].text.substring(0, splitPos);
+          String toPrintNextRow = cols[i].text.substring(splitPos);
 
-        // Print each lexeme using codetable OR kanji
-        int? colIndex = colInd;
-        for (var j = 0; j < lexemes.length; ++j) {
-          bytes += _text(
-            _encode(lexemes[j], isKanji: isLexemeChinese[j]),
-            styles: cols[i].styles,
-            colInd: colIndex,
-            colWidth: cols[i].width,
-            isKanji: isLexemeChinese[j],
-          );
-          // Define the absolute position only once (we print one line only)
-          colIndex = null;
+          // Only apply word-aware splitting if we're not in the middle of a word
+          if (toPrintNextRow.isNotEmpty && splitPos > 0 && !cols[i].text[splitPos-1].contains(RegExp(r'\s'))) {
+            // Look for the last space in the text to print
+            int lastSpaceIndex = toPrint.lastIndexOf(' ');
+            if (lastSpaceIndex > 0) {
+              // Adjust the split
+              toPrintNextRow = toPrint.substring(lastSpaceIndex + 1) + toPrintNextRow;
+              toPrint = toPrint.substring(0, lastSpaceIndex);
+            }
+          }
+
+          if (toPrintNextRow.isNotEmpty) {
+            isNextRow = true;
+            nextRow.add(PosColumn(
+                text: toPrintNextRow,
+                containsChinese: true,
+                width: cols[i].width,
+                styles: cols[i].styles));
+          } else {
+            // Insert an empty col
+            nextRow.add(PosColumn(
+                text: '', width: cols[i].width, styles: cols[i].styles));
+          }
+
+          // Print current row
+          final list = _getLexemes(toPrint);
+          final List<String> lexemes = list[0];
+          final List<bool> isLexemeChinese = list[1];
+
+          int? colIndex = colInd;
+          for (var j = 0; j < lexemes.length; ++j) {
+            bytes += _text(
+              _encode(lexemes[j], isKanji: isLexemeChinese[j]),
+              styles: cols[i].styles,
+              colInd: colIndex,
+              colWidth: cols[i].width,
+              isKanji: isLexemeChinese[j],
+            );
+            colIndex = null;
+          }
         }
       }
     }
